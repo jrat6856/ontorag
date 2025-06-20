@@ -1,3 +1,6 @@
+"""
+Heuristics to split scientific papers into sections
+"""
 import argparse
 from pathlib import Path
 

@@ -1,3 +1,10 @@
+"""
+Termo: A class for extracting and processing domain-specific terminology from a text.
+
+This module supports term extraction, acronym expansion, definition identification,
+and relationship extraction using LLMs (via Ollama or Anthropic). It includes
+post-processing to remove duplicates, substrings, and hallucinated terms.
+"""
 import os
 import re
 from functools import cmp_to_key
@@ -15,6 +22,12 @@ from thinc.api import require_gpu, set_gpu_allocator
 
 
 class Termo(dict):
+    """
+    Extract and manage terms, acronyms, relationships, and definitions from text.
+
+    Inherits from `dict`, storing results under keys like "terms", "acronyms", 
+    "relationships", and "definitions".
+    """
     def __init__(
         self,
         text,
@@ -68,6 +81,17 @@ class Termo(dict):
         return self["terms"]
 
     def extract_acronyms(self, model, max_length_split=2000, **kwargs):
+        """
+        Extract acronyms and map them to their full forms using LLM.
+
+        Args:
+            model (str): Model identifier.
+            max_length_split (int): Max characters per query.
+            **kwargs: Additional keyword arguments for LLM query.
+
+        Returns:
+            dict: Mapping of acronym -> full form.
+        """
         terms = [term[0] for term in self["terms"]]
         self["acronyms"] = self.get_acronyms_from_llm(
             model, self.text, terms, max_length_split, **kwargs
@@ -78,6 +102,17 @@ class Termo(dict):
         return self["acronyms"]
 
     def extract_relationships(self, model, max_length_split=2000, **kwargs):
+        """
+        Extract relationships between terms and acronyms using LLM.
+
+        Args:
+            model (str): Model identifier.
+            max_length_split (int): Max characters per LLM query.
+            **kwargs: Additional keyword arguments for query function.
+
+        Returns:
+            list: List of triplets (term1, relationship, term2).
+        """
         terms = [term[0] for term in self["terms"]]
         acronyms = [ac[0] for ac in self["acronyms"].items()]
         # here, exclusively, we consider acronyms as terms
@@ -91,6 +126,17 @@ class Termo(dict):
         return self["relationships"]
 
     def extract_definitions(self, model, max_length_split=2000, **kwargs):
+        """
+        Extract definitions for identified terms using LLM.
+
+        Args:
+            model (str): Model name to query.
+            max_length_split (int): Max characters per chunk sent to LLM.
+            **kwargs: Extra arguments for query.
+
+        Returns:
+            dict: Mapping of term -> definition.
+        """
         terms = [term[0] for term in self["terms"]]
         self["definitions"] = self.get_definitions_from_llm(
             model, self.text, terms, max_length_split, **kwargs
@@ -101,6 +147,17 @@ class Termo(dict):
         return self["definitions"]
 
     def query_anthropic(self, model, prompt, **kwargs):
+        """
+        Query the Anthropic API with a given prompt.
+
+        Args:
+            model (str): Anthropic model name.
+            prompt (str): Prompt to send.
+            **kwargs: Extra parameters (ignored here).
+
+        Returns:
+            str: Textual response from the model.
+        """
         client = anthropic.Anthropic(
             api_key=os.environ["ANTHROPIC_API_KEY"],
         )
@@ -115,12 +172,34 @@ class Termo(dict):
         return message.content[0].text
 
     def query_ollama(self, model, prompt, **kwargs):
+        """
+        Query Ollama with a given prompt.
+
+        Args:
+            model (str): Ollama model name.
+            prompt (str): Prompt to send.
+            **kwargs: Extra parameters passed to Ollama.
+
+        Returns:
+            str: Response string from the model.
+        """
         response = ollama.generate(model=model, prompt=prompt, **kwargs)
         return response["response"]
 
     def postprocess_terms(
         self, all_terms, remove_duplicates=True, remove_substrings=True
     ):
+        """
+        Apply duplicate and substring filtering to term list.
+
+        Args:
+            all_terms (list): List of term tuples.
+            remove_duplicates (bool): Whether to deduplicate.
+            remove_substrings (bool): Whether to remove substrings.
+
+        Returns:
+            list: Cleaned list of term tuples.
+        """
         if remove_duplicates:
             all_terms = self.remove_duplicated_terms(all_terms)
         if remove_substrings:
@@ -128,7 +207,9 @@ class Termo(dict):
         return all_terms
 
     def postprocess_relationships(self, relationships, text, terms):
-        # remove those relationships with terms not in terms list
+        """
+        Remove those relationships with terms not in terms list
+        """
         result = []
         lower_terms = [term.lower() for term in terms]
         for t1, rel, t2 in relationships:
@@ -141,7 +222,9 @@ class Termo(dict):
         return result
 
     def postprocess_definitions(self, definitions, text, terms):
-        # remove those relationships with terms not in terms list
+        """
+        Remove those relationships with terms not in terms list
+        """
         result = {}
         lower_terms = [term.lower() for term in terms]
         for term, defi in definitions.items():
@@ -154,10 +237,21 @@ class Termo(dict):
         return result
 
     def remove_duplicated_terms(self, all_terms):
+        """
+        Remove duplicated term entries.
+
+        Args:
+            all_terms (list): List of term tuples or strings.
+
+        Returns:
+            list: Deduplicated list.
+        """
         return list(set(all_terms))
 
     def remove_substrings_from_list(self, all_terms):
-        # sort by increasing end position. If two terms have the same end position, sort by increasing start position
+        """
+        Sort by increasing end position. If two terms have the same end position, sort by increasing start position
+        """
         def comp(x, y):
             if x[1] != y[1]:  # compare start position
                 return x[1] - y[1]
@@ -182,6 +276,15 @@ class Termo(dict):
         return result
 
     def split_text_into_lines(self, text):
+        """
+        Segment input text into sentences using spaCy.
+
+        Args:
+            text (str): Text to split.
+
+        Returns:
+            list: List of sentences.
+        """
         set_gpu_allocator("pytorch")
         require_gpu(0)
 
@@ -192,7 +295,18 @@ class Termo(dict):
         return sentences
 
     def get_list_from_llm(self, model, text, max_length_split=2000, **kwargs):
+        """
+        Extract raw list of terms from text using LLM via chunked prompts.
 
+        Args:
+            model (str): Model name.
+            text (str): Text to analyze.
+            max_length_split (int): Max characters per chunk.
+            **kwargs: Extra parameters for LLM.
+
+        Returns:
+            list: List of raw term strings.
+        """
         lines = self.split_text_into_lines(text)
 
         list_terms = []
@@ -221,6 +335,9 @@ class Termo(dict):
         return list_terms
 
     def _build_chunks(self, text, max_length_split):
+        """
+        Build chunks of text for LLM processing.
+        """
         lines = self.split_text_into_lines(text)
         chunks = []
         current_chunk = ""
@@ -237,7 +354,19 @@ class Termo(dict):
     def get_relationships_from_llm(
         self, model, text, terms, max_length_split=2000, **kwargs
     ):
+        """
+        Identify semantic relationships between terms.
 
+        Args:
+            model (str): Model to use.
+            text (str): Full source text.
+            terms (list): List of known terms to relate.
+            max_length_split (int): Chunk size.
+            **kwargs: Extra arguments for LLM.
+
+        Returns:
+            list: Triplets (term1, relation, term2).
+        """
         relationships = []
         set_terms = set(terms)
 
@@ -276,7 +405,19 @@ class Termo(dict):
     def get_definitions_from_llm(
         self, model, text, terms, max_length_split=2000, **kwargs
     ):
+        """
+        Retrieve definitions for known terms.
 
+        Args:
+            model (str): LLM model name.
+            text (str): Full source text.
+            terms (list): Terms to define.
+            max_length_split (int): Max characters per prompt.
+            **kwargs: Extra params for LLM.
+
+        Returns:
+            dict: Mapping of term -> definition.
+        """
         definitions = {}
         set_terms = set(terms)
 
@@ -315,7 +456,19 @@ class Termo(dict):
     def get_acronyms_from_llm(
         self, model, text, terms, max_length_split=2000, **kwargs
     ):
+        """
+        Extract acronym definitions from the text.
 
+        Args:
+            model (str): Model name.
+            text (str): Text to analyze.
+            terms (list): Terms to match.
+            max_length_split (int): Max length of each chunk.
+            **kwargs: Additional parameters for the query.
+
+        Returns:
+            dict: Mapping of acronym -> full form.
+        """
         acronyms = {}
         set_terms = set(terms)
 
@@ -357,6 +510,9 @@ class Termo(dict):
         return acronyms
 
     def get_acronyms_from_llm_full_text(self, model, text, terms, **params):
+        """
+        Extract acronyms without chunking the text.
+        """
         set_terms = set(terms)
         prompt = prompt_acronym.format(
             CONTEXT=text, VOCABULARY="\n".join(set_terms)
@@ -380,7 +536,9 @@ class Termo(dict):
         return acronyms
 
     def postprocess_acronyms(self, acronyms, text, terms):
-        # remove acronyms that are not in the text
+        """
+        Remove acronyms that are not in the text
+        """
         result = {}
         for acronym, term in acronyms.items():
             if (
@@ -435,6 +593,19 @@ class Termo(dict):
         max_length_split=2000,
         **kwargs,
     ):
+        """
+        Extract and match LLM-suggested terms to original text.
+
+        Args:
+            model (str): Model name.
+            text (str): Source text.
+            space_separator (bool): Whether to require space-bounded matches.
+            max_length_split (int): Max characters per LLM chunk.
+            **kwargs: Extra arguments to query function.
+
+        Returns:
+            list: Matched terms as tuples (term, start, end, sentence_index).
+        """
         terms = self.get_list_from_llm(model, text, max_length_split, **kwargs)
 
         sentences = self.split_text_into_lines(text)

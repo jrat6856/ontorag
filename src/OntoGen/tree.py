@@ -1,3 +1,6 @@
+"""
+A standard tree implementation to manipulate hierarchical information.
+"""
 import spacy
 
 nlp = spacy.load("en_core_web_sm")

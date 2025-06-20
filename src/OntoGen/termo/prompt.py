@@ -1,3 +1,7 @@
+"""
+A collection of prompt templates for extracting terms, acronyms, verbs, triplets, and definitions from scientific texts.
+"""
+
 prompt_abstract = """
 Given this scientific text:
 
