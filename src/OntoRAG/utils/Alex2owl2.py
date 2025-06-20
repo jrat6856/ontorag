@@ -1,3 +1,6 @@
+"""
+A class to convert ontogen tree format into OWL ontology format using Owlready2.
+"""
 import pickle
 import re
 from typing import Dict, Optional
@@ -65,9 +68,7 @@ class OntoGen2Owl(BaseModel):
         words = re.findall(r"\w+", name)
         return "".join(word.capitalize() for word in words)
 
-    def create_ontology_from_relationships(
-        self, relationships, definitions: Optional[Dict[str, str]] = None
-    ):
+    def create_ontology_from_relationships(self, relationships, definitions: Optional[Dict[str, str]] = None):
         """Create an ontology from the relationships."""
         onto = owlready2.get_ontology("http://example.org/example.owl")
 

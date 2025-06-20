@@ -1,3 +1,6 @@
+"""
+    A class to process statements and recognize ontology concepts using spaCy and OWL ontologies.
+"""
 import json
 import os
 from collections import defaultdict
@@ -10,6 +13,7 @@ from spacy.util import minibatch
 
 
 class OntologyNER:
+
     def __init__(self, ontology_folder, debug=False):
         self.ontology_folder = ontology_folder
         self.debug = debug
@@ -119,12 +123,14 @@ class OntologyNER:
         """Retrieve the definition of a concept in an ontology."""
 
         def get_first_value(annotation):
+            """Returns the first value of an annotation or 'Not available'."""
             if annotation:
                 value = annotation.first()
                 return str(value) if value is not None else "Not available"
             return "Not available"
 
         def collect_props_cls(cls):
+            """Collect properties for a class in the ontology."""
             if not cls.label and cls.name:
                 cls.label = cls.name.lower()
             if isinstance(cls.label, str):
@@ -140,6 +146,7 @@ class OntologyNER:
         with onto:
 
             class IAO_0000115(owlready2.AnnotationProperty):
+                """Annotation property for definitions."""
                 namespace = onto.get_namespace(
                     "http://purl.obolibrary.org/obo/"
                 )

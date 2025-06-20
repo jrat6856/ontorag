@@ -72,9 +72,7 @@ class OntoGen2Owl(BaseModel):
         words = re.findall(r"\w+", name)
         return "".join(word.capitalize() for word in words)
 
-    def create_ontology_from_relationships(
-        self, relationships, descriptions: Optional[Dict[str, str]] = None
-    ):
+    def create_ontology_from_relationships(self, relationships, descriptions: Optional[Dict[str, str]] = None):
         """Create an ontology from the relationships."""
         onto = owlready2.get_ontology("http://example.org/example.owl")
 

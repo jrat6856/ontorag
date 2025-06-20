@@ -1,3 +1,6 @@
+"""
+A CLI module to generate higher level categories from a collection of scientific papers.
+"""
 import argparse
 import logging
 import random

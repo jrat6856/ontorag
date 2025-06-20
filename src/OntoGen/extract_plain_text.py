@@ -1,3 +1,6 @@
+"""
+A CLI tool for extracting plain text from PDF files using Nougat and PyMuPDF.
+"""
 import argparse
 import re
 import subprocess

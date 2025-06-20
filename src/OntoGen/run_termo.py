@@ -1,3 +1,6 @@
+"""
+A CLI module that runs Termo to extract terms, acronyms, definitions, and relationships from a text file.
+"""
 import argparse
 import logging
 import sys
@@ -23,6 +26,9 @@ def extract_terms(
     skip_definitions=False,
     skip_relationships=False,
 ):
+    """
+    Auxiliary method to run Termo
+    """
     text_file = Path(text_file)
     term_file = text_file.parent / (text_file.stem + ".terms.csv")
     defi_file = text_file.parent / (text_file.stem + ".definitions.csv")

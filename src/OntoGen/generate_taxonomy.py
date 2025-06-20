@@ -1,3 +1,6 @@
+"""
+A CLI tool to generate a taxonomy from a list of text files using an Ollama model.
+"""
 # import anthropic
 import argparse
 import logging
