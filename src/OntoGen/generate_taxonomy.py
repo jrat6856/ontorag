@@ -9,12 +9,14 @@ import random
 import re
 from collections import defaultdict
 from pathlib import Path
+import time
 
 import ollama
 import requests
 from tree import Tree, lemma
 from unidecode import unidecode
 from utils import read_tuples_list_from_csv
+from openai import OpenAI
 
 logging.basicConfig(level=logging.INFO)
 
@@ -37,6 +39,33 @@ If a term does not fit in any of the categories, say "None".
 If the text is not clear enough to classify a term, say "None".
 If the text does not explicitly mention that a term is a type of another, say "None".
 If multiple categories apply, choose the most specific one.
+In the ouput include only the classification. Do not include any explanation or additional information.
+Do not classify a term to be its own parent, this is, do not output answers such as "A isA A".
+The answer should include 'isA'.
+
+
+{TERMS}
+
+"""
+
+prompt_olft = """
+Given this context:
+
+===
+{CONTEXT}
+===
+
+,And given the following classes:
+
+===
+{CLASSES}
+===
+
+Complete the following list to classify the terms into the classes according to the context.
+If a term does not fit in any of the classes, say "None".
+If the text is not clear enough to classify a term, say "None".
+If the text does not explicitly mention that a term is a type of another, say "None".
+If multiple classes apply, choose the most specific one.
 In the ouput include only the classification. Do not include any explanation or additional information.
 Do not classify a term to be its own parent, this is, do not output answers such as "A isA A".
 The answer should include 'isA'.
@@ -109,21 +138,27 @@ def process_vocabulary(vocabulary, acronyms):
     """
     id_to_synonyms = defaultdict(set)
 
+    # Sort vocabulary for deterministic behavior
+    vocabulary = sorted(vocabulary)
     # remove asterisks as these are probably artifacts from vocabulary extraction
     vocabulary = [v.replace("*", "") for v in vocabulary]
+    
+    # Sort acronyms items for deterministic processing
+    sorted_acronyms = dict(sorted(acronyms.items()))
+    
     # remove acronyms from the vocabulary
-    for acr in acronyms:
+    for acr in sorted_acronyms:
         if acr in vocabulary:
             vocabulary.remove(acr)
 
-    for acr, term in acronyms.items():
+    for acr, term in sorted_acronyms.items():
         id_to_synonyms[universal_id(term)].add(acr)
         id_to_synonyms[universal_id(term)].add(term)
 
     vocabulary = [(v, v) for v in vocabulary]  # old and new vocabulary
     # clean vocabulary from acronyms
     for i in range(len(vocabulary)):
-        for acronym, term in acronyms.items():
+        for acronym, term in sorted_acronyms.items():
             oldv, newv = vocabulary[i]
             if f"({acronym})" in oldv:
                 vocabulary[i] = oldv, newv.replace(f"({acronym})", "").strip()
@@ -153,7 +188,46 @@ def process_vocabulary(vocabulary, acronyms):
     return [v1 for v1, v2 in vocabulary], id_to_synonyms
 
 
-def query(model, context, taxonomy, terms, options={}):
+def query_ollama(model, prompt, options={}):
+    response = ollama.chat(
+        model=model,
+        messages=[
+            {
+                "role": "user",
+                "content": prompt,
+            },
+        ],
+        options=options,
+    )
+    return response["message"]["content"]
+
+
+def query_oai(model, prompt, base_url, options={}):
+    client = OpenAI(
+        base_url=base_url,
+        api_key=os.getenv("OPENAI_API_KEY")
+    )
+    completion = client.chat.completions.create(
+        model=model,
+        messages=[
+            {
+                "role": "user",
+                "content": prompt
+            }
+        ],
+        **options
+    )
+    return completion.choices[0].message.content
+
+
+def query(
+        model, 
+        context, 
+        taxonomy, 
+        terms, 
+        backend='ollama', 
+        base_url=None,
+        options={}):
     """
     Query the taxonomic relations of a list of terms given a context and a taxonomy,
     using an Ollama model.
@@ -173,18 +247,16 @@ def query(model, context, taxonomy, terms, options={}):
         TAXONOMY=taxonomy,
         TERMS="\n".join([t + " isA " for t in terms]),
     )
-    logging.info("PROMPT:" + formated_prompt)
-    response = ollama.chat(
-        model=model,
-        messages=[
-            {
-                "role": "user",
-                "content": formated_prompt,
-            },
-        ],
-        options=options,
-    )
-    return response["message"]["content"]
+    logging.info('-' * 20 + "PROMPT" + '-' * 20)
+    logging.info(formated_prompt)
+    logging.info('-' * 60)
+    if backend == 'ollama':
+        response = query_ollama(model, formated_prompt, options)
+    elif backend == 'oai':
+        response = query_oai(model, formated_prompt, base_url, options)
+    else:   
+        raise ValueError(f"Unknown backend: {backend}")
+    return response
 
 
 def parse_answer(answer):
@@ -202,7 +274,6 @@ def parse_answer(answer):
     lines = answer.split("\n")
     res = {}
     for l in lines:
-        print(l)
         if "isA" in l or ":" in l or "is" in l:
             separator = None
             if ":" in l:
@@ -241,7 +312,10 @@ def add_asnwers(wordmap, answers, root, destructive=False):
     Returns:
     dict: Updated wordmap dictionary.
     """
-    for k, v in answers.items():
+    # Sort answers for deterministic processing
+    sorted_answers = dict(sorted(answers.items()))
+    
+    for k, v in sorted_answers.items():
         if "None" in v:
             continue
         if k not in wordmap or v not in wordmap:
@@ -280,7 +354,7 @@ def remove_self_loops_tree(tree):
     return tree
 
 
-def majority_voting_answers(wordmap, answers_list):
+def majority_voting_answers(wordmap, answers_list, majority=None):
     """
     Perform majority voting on a list of answers to get the most common taxonomic relationships.
     The majority is calculated as the half of the number of answers plus one.
@@ -294,11 +368,14 @@ def majority_voting_answers(wordmap, answers_list):
     dict: Dictionary with the most common taxonomic relationships.
     """
     res = {}
-    majority = len(answers_list) // 2 + 1
+    if majority is None:
+        majority = len(answers_list) // 2 + 1
 
     count = defaultdict(int)
     for answers in answers_list:
-        for k, v in answers.items():
+        # Sort answers for deterministic processing
+        sorted_answers = dict(sorted(answers.items()))
+        for k, v in sorted_answers.items():
             if k == "None" or v == "None":
                 continue
             if (
@@ -309,7 +386,8 @@ def majority_voting_answers(wordmap, answers_list):
             ):
                 count[(k, v)] += 1
 
-    for k, v in count.items():
+    # Sort count items for deterministic result
+    for k, v in sorted(count.items()):
         if v >= majority:
             res[k[0]] = k[1]
 
@@ -317,12 +395,18 @@ def majority_voting_answers(wordmap, answers_list):
 
 
 def generate_taxonomy(
+    root_dir,
     category_seed_file,
     txt_files,
     model,
     model_params,
     num_iterations,
     prompt_include_path,
+    backend='ollama',
+    base_url=None,
+    seed=42,
+    sc_retry=3,
+    majority=None,
 ):
     """
     Generate a taxonomy from a list of text files using an Ollama model.
@@ -339,6 +423,7 @@ def generate_taxonomy(
             less prone to errors.
     """
 
+    start_time = time.time()
     cats = get_initial_categories(category_seed_file)
 
     tree = Tree("Thing")
@@ -349,13 +434,16 @@ def generate_taxonomy(
     title_to_acron = defaultdict(dict)
     title_to_context = {}
 
-    for txt in txt_files:
+    # Sort txt_files for deterministic processing
+    sorted_txt_files = sorted(txt_files)
+
+    for txt in sorted_txt_files:
         txt_path = Path(txt)
         title = txt_path.stem
 
         root_folder = txt_path.parent
-        terms_csv = os.path.join(root_folder, f"{title}.terms.csv")
-        acron_csv = os.path.join(root_folder, f"{title}.acronyms.csv")
+        terms_csv = os.path.join(root_dir, f"{title}.terms.csv")
+        acron_csv = os.path.join(root_dir, f"{title}.acronyms.csv")
 
         terms = read_tuples_list_from_csv(terms_csv)
         acron = read_tuples_list_from_csv(acron_csv)
@@ -364,7 +452,8 @@ def generate_taxonomy(
         title_to_context[txt] = txt_path.read_text()
 
     merged_ids_to_synonyms = defaultdict(set)
-    for title in title_to_terms.keys():
+    # Sort keys for deterministic processing
+    for title in sorted(title_to_terms.keys()):
         vocabulary = list(title_to_terms[title])
         acronyms = title_to_acron[title]
         vocabulary, id_to_synonyms = process_vocabulary(vocabulary, acronyms)
@@ -374,10 +463,13 @@ def generate_taxonomy(
 
     wordmap = {}
     repeated_ids = set()
-    for k, v in merged_ids_to_synonyms.items():
-        t = Tree(list(v)[0])
-        t.synonyms = list(v)
-        for syn in v:
+    # Sort keys for deterministic processing
+    for k, v in sorted(merged_ids_to_synonyms.items()):
+        # Sort synonyms for deterministic behavior
+        sorted_synonyms = sorted(list(v))
+        t = Tree(sorted_synonyms[0])
+        t.synonyms = sorted_synonyms
+        for syn in sorted_synonyms:
             if syn in wordmap:
                 repeated_ids.add(syn)
                 ## remove the synonym from the wordmap
@@ -405,15 +497,17 @@ def generate_taxonomy(
         logging.info(f"    Level {iteration}")
         logging.info("#" * 80)
 
-        # randomly shuffle list_titles
-        random.shuffle(list_titles)
+        # Use deterministic shuffling based on seed and iteration
+        rng = random.Random(seed + iteration)
+        list_titles_copy = list_titles.copy()
+        rng.shuffle(list_titles_copy)
 
-        for j in range(len(list_titles)):
+        for j in range(len(list_titles_copy)):
             answers_list = []
 
-            for retry in range(3):
+            for retry in range(sc_retry):
 
-                title = list_titles[j]
+                title = list_titles_copy[j]
                 context = title_to_context[title]
 
                 tree_terms, tree_paths = tree.get_terms_and_paths(ctx=context)
@@ -424,7 +518,8 @@ def generate_taxonomy(
                 )
                 vocabulary = [v for v in vocabulary if v not in repeated_ids]
                 # vocabulary = [list(v)[0] for k,v in merged_ids_to_synonyms.items()] # whole vocabulary
-                terms = vocabulary
+                terms = sorted(vocabulary)  # Sort terms for deterministic behavior
+                random.shuffle(terms)
 
                 # remove 'Thing' from the tree list and tree path
                 try:
@@ -483,36 +578,475 @@ def generate_taxonomy(
                             tree_terms[i] += f" ({joined_tree_paths})"
 
                 # taxonomy = '\n'.join(tree_terms) + '\n' + '\n'.join(vocabulary)
-                taxonomy = "\n".join(tree_terms)
+                # Sort tree_terms for deterministic taxonomy string
+                tt = sorted(tree_terms)
+                random.shuffle(tt)
+                taxonomy = "\n".join(tt)
 
-                response = query(model, context, taxonomy, terms, model_params)
-                logging.info("RESPONSE: " + response)
+                response = query(model, context, taxonomy, terms, backend, base_url, model_params)
+                logging.info(('-' * 20) + "RESPONSE: " + ('-' * 20))
+                logging.info(response)
+                logging.info('-' * 60)
 
                 answers = parse_answer(response)
                 answers_list.append(answers)
+                
+                logging.info(('-' * 20) + "PARSED ANSWERS: " + ('-' * 20))
+                # Sort answers for deterministic logging
                 logging.info(
-                    "\nANSWERS:"
-                    + "\n".join([f"{k} isA {v}" for k, v in answers.items()])
+                    "\n".join([f"{k} isA {v}" for k, v in sorted(answers.items())])
                 )
+                logging.info('-' * 60)
 
-            answers = majority_voting_answers(wordmap, answers_list)
+            answers = majority_voting_answers(wordmap, answers_list, majority)
+            logging.info(('-' * 20) + "MAJORITY VOTING: " + ('-' * 20))
+            # Sort answers for deterministic logging
             logging.info(
-                "\nMAJORITY VOTING ANSWERS:"
-                + "\n".join([f"{k} isA {v}" for k, v in answers.items()])
+                "\n".join([f"{k} isA {v}" for k, v in sorted(answers.items())])
             )
+            logging.info('-' * 60)
             wordmap = add_asnwers(wordmap, answers, tree, destructive=False)
             tree = remove_self_loops_tree(tree)
 
             # taxonomy directory
-            taxonomy_dir = Path(f"taxonomy")
+            taxonomy_dir = Path(f"taxonomy_sc{sc_retry}_{seed}")
             taxonomy_dir.mkdir(parents=True, exist_ok=True)
 
             import pickle
 
-            with open(f"taxonomy/wordmap_{iteration}.pkl", "wb") as f:
+            with open(f"taxonomy_sc{sc_retry}_{seed}/wordmap_{iteration}.pkl", "wb") as f:
                 pickle.dump(wordmap, f)
-            with open(f"taxonomy/tree_{iteration}.pkl", "wb") as f:
+            with open(f"taxonomy_sc{sc_retry}_{seed}/tree_{iteration}.pkl", "wb") as f:
                 pickle.dump(tree, f)
+
+
+        current_time = time.time()
+        logging.info(f"--- Wall clock time: {current_time - start_time} seconds ---")
+
+
+def query_llm4ol(
+        model, 
+        term1, 
+        term2,
+        backend='ollama', 
+        base_url=None,
+        options={}):
+    """
+    Query the taxonomic relations of a list of terms given a context and a taxonomy,
+    using an Ollama model.
+
+    Parameters:
+    model (str): Ollama model tag to use.
+    context (str): Context to use in the query.
+    taxonomy (str): Taxonomy to use in the query.
+    terms (list): List of terms to classify.
+    options (dict): Options to use in the query.
+
+    Returns:
+    str: Response from the Ollama model.
+    """
+
+    prompt_llm4ol = """
+    Identify whether the following statement is true or false.
+    Answer with 'True' or 'False' only.
+    
+    Statement: '{TERM1}' is a subtype of '{TERM2}'.
+    """
+    formated_prompt = prompt_llm4ol.format(
+        TERM1=term1,
+        TERM2=term2
+    )
+    #print('-' * 20 + "PROMPT" + '-' * 20)
+    #print(formated_prompt)
+    #print('-' * 60)
+
+    if backend == 'ollama':
+        response = query_ollama(model, formated_prompt, options)
+    elif backend == 'oai':
+        response = query_oai(model, formated_prompt, base_url, options)
+    else:   
+        raise ValueError(f"Unknown backend: {backend}")
+    #print('-' * 20 + "RESPONSE" + '-' * 20)
+    #print(response)
+    #print('-' * 60)
+    return response
+
+
+def generate_taxonomy_llm4ol(
+    root_dir,
+    category_seed_file,
+    txt_files,
+    model,
+    model_params,
+    num_iterations,
+    prompt_include_path,
+    backend='ollama',
+    base_url=None,
+    seed=42,
+):
+    """
+    Generate a taxonomy from a list of text files using an Ollama model.
+
+    Parameters:
+    category_seed_file (str): Path to the category seed txt file.
+    txt_files (list): List of paths to the text files to process.
+    model (str): Ollama model tag to use to generate categories.
+    model_params (dict): Additional parameters to pass to the Ollama model.
+    num_iterations (int): Number of iterations to run for each text file. The majority answer from the answers from the iterations is used.
+    prompt_include_path (bool): Include a term path in the taxonomy (i.e. parent categories).
+            If True, the parent categories are included in the taxonomy. This provides more context for the model but
+            might bias the answers towards the parent categories, while making the output taxonomy more consistent and
+            less prone to errors.
+    """
+
+    start_time = time.time()
+    cats = get_initial_categories(category_seed_file)
+
+    tree = Tree("Thing")
+    for t in cats:
+        tree.children.append(Tree(t))
+
+    title_to_terms = defaultdict(set)
+    title_to_acron = defaultdict(dict)
+    title_to_context = {}
+
+    # Sort txt_files for deterministic processing
+    sorted_txt_files = sorted(txt_files)
+
+    for txt in sorted_txt_files:
+        txt_path = Path(txt)
+        title = txt_path.stem
+
+        root_folder = txt_path.parent
+        terms_csv = os.path.join(root_dir, f"{title}.terms.csv")
+        acron_csv = os.path.join(root_dir, f"{title}.acronyms.csv")
+
+        terms = read_tuples_list_from_csv(terms_csv)
+        acron = read_tuples_list_from_csv(acron_csv)
+        title_to_terms[txt] = set([t[0] for t in terms])
+        title_to_acron[txt] = {t[0]: t[1] for t in acron}
+        title_to_context[txt] = txt_path.read_text()
+
+    merged_ids_to_synonyms = defaultdict(set)
+    # Sort keys for deterministic processing
+    for title in sorted(title_to_terms.keys()):
+        vocabulary = list(title_to_terms[title])
+        acronyms = title_to_acron[title]
+        vocabulary, id_to_synonyms = process_vocabulary(vocabulary, acronyms)
+        # merge 2 dictionaries
+        for k, v in id_to_synonyms.items():
+            merged_ids_to_synonyms[k] = merged_ids_to_synonyms[k].union(v)
+
+    wordmap = {}
+    repeated_ids = set()
+    # Sort keys for deterministic processing
+    for k, v in sorted(merged_ids_to_synonyms.items()):
+        # Sort synonyms for deterministic behavior
+        sorted_synonyms = sorted(list(v))
+        t = Tree(sorted_synonyms[0])
+        t.synonyms = sorted_synonyms
+        for syn in sorted_synonyms:
+            if syn in wordmap:
+                repeated_ids.add(syn)
+                ## remove the synonym from the wordmap
+                # t = wordmap.pop(syn)
+                # make wordmap point to the previous tree (the current one will be ignored)
+                print("Merging nodes: ", wordmap[syn].synonyms, t.synonyms)
+                wordmap[syn] = t
+
+            else:
+                wordmap[syn] = t
+
+    tree_terms = tree.get_terms()
+    # remove 'Thing' from the tree list
+    tree_terms.remove("Thing")
+
+    # set wordmap entries for existing tree
+    for node in tree.get_nodes_list():
+        wordmap[node.synonyms[0]] = node
+
+    list_titles = list(title_to_terms.keys())
+    list_titles.sort()
+
+    for iteration in range(num_iterations):
+        logging.info("#" * 80)
+        logging.info(f"    Level {iteration}")
+        logging.info("#" * 80)
+
+        # Use deterministic shuffling based on seed and iteration
+        rng = random.Random(seed + iteration)
+        list_titles_copy = list_titles.copy()
+        rng.shuffle(list_titles_copy)
+
+        for j in range(len(list_titles_copy)):
+            answers_list = []
+
+            title = list_titles_copy[j]
+            context = title_to_context[title]
+
+            tree_terms, tree_paths = tree.get_terms_and_paths(ctx=context)
+            # tree_terms, tree_paths = tree.get_level_terms_and_path(level + 1, ctx=context)
+
+            vocabulary, _ = process_vocabulary(
+                list(title_to_terms[title]), title_to_acron[title]
+            )
+            vocabulary = [v for v in vocabulary if v not in repeated_ids]
+            # vocabulary = [list(v)[0] for k,v in merged_ids_to_synonyms.items()] # whole vocabulary
+            terms = sorted(vocabulary)  # Sort terms for deterministic behavior
+            random.shuffle(terms)
+            print("----> paper", j, " out of ", len(list_titles_copy), " with ", len(terms), " terms")
+            count = 0
+            answers = {}
+            for word1 in terms:
+                count += 1
+                print(f"({count}/{len(terms)}) Querying LLM4OL for: {word1}")
+                for word2 in terms + cats:
+                    if word1 == word2:
+                        continue
+                    if wordmap[word1] == wordmap[word2]:
+                        continue
+
+                    response = query_llm4ol(model, word1, word2, backend, base_url, model_params)
+                    if "True" in response:
+                        answers[word1] = word2
+                    elif "False" in response:
+                        pass
+                    else:
+                        print("Unexpected response: ", response)
+
+            answers_list.append(answers)
+            
+            logging.info(('-' * 20) + "PARSED ANSWERS: " + ('-' * 20))
+            # Sort answers for deterministic logging
+            logging.info(
+                "\n".join([f"{k} isA {v}" for k, v in sorted(answers.items())])
+            )
+            logging.info('-' * 60)
+
+            answers = majority_voting_answers(wordmap, answers_list, majority=1)
+            logging.info(('-' * 20) + "MAJORITY VOTING: " + ('-' * 20))
+            # Sort answers for deterministic logging
+            logging.info(
+                "\n".join([f"{k} isA {v}" for k, v in sorted(answers.items())])
+            )
+            logging.info('-' * 60)
+            wordmap = add_asnwers(wordmap, answers, tree, destructive=False)
+            tree = remove_self_loops_tree(tree)
+
+            # taxonomy directory
+            taxonomy_dir = Path(f"taxonomy_llm4ol_{seed}")
+            taxonomy_dir.mkdir(parents=True, exist_ok=True)
+
+            import pickle
+
+            with open(f"taxonomy_llm4ol_{seed}/wordmap_{iteration}.pkl", "wb") as f:
+                pickle.dump(wordmap, f)
+            with open(f"taxonomy_llm4ol_{seed}/tree_{iteration}.pkl", "wb") as f:
+                pickle.dump(tree, f)
+            current_time = time.time()
+            logging.info(f"--- Wall clock time: {current_time - start_time} seconds ---")
+    
+
+def query_olft(
+        model, 
+        context, 
+        classes,
+        terms, 
+        backend='ollama', 
+        base_url=None,
+        options={}):
+    """
+    Query the taxonomic relations of a list of terms given a context and a taxonomy,
+    using an Ollama model.
+
+    Parameters:
+    model (str): Ollama model tag to use.
+    context (str): Context to use in the query.
+    taxonomy (str): Taxonomy to use in the query.
+    terms (list): List of terms to classify.
+    options (dict): Options to use in the query.
+
+    Returns:
+    str: Response from the Ollama model.
+    """
+    formated_prompt = prompt_olft.format(
+        CONTEXT=context,
+        CLASSES="\n".join(classes),
+        TERMS="\n".join([t + " isA " for t in terms]),
+    )
+    logging.info('-' * 20 + "PROMPT" + '-' * 20)
+    logging.info(formated_prompt)
+    logging.info('-' * 60)
+    if backend == 'ollama':
+        response = query_ollama(model, formated_prompt, options)
+    elif backend == 'oai':
+        response = query_oai(model, formated_prompt, base_url, options)
+    else:   
+        raise ValueError(f"Unknown backend: {backend}")
+    return response
+
+
+def generate_taxonomy_olft(
+    root_dir,
+    category_seed_file,
+    txt_files,
+    model,
+    model_params,
+    num_iterations,
+    prompt_include_path,
+    backend='ollama',
+    base_url=None,
+    seed=42,
+):
+    """
+    Generate a taxonomy from a list of text files using an Ollama model.
+
+    Parameters:
+    category_seed_file (str): Path to the category seed txt file.
+    txt_files (list): List of paths to the text files to process.
+    model (str): Ollama model tag to use to generate categories.
+    model_params (dict): Additional parameters to pass to the Ollama model.
+    num_iterations (int): Number of iterations to run for each text file. The majority answer from the answers from the iterations is used.
+    prompt_include_path (bool): Include a term path in the taxonomy (i.e. parent categories).
+            If True, the parent categories are included in the taxonomy. This provides more context for the model but
+            might bias the answers towards the parent categories, while making the output taxonomy more consistent and
+            less prone to errors.
+    """
+
+    start_time = time.time()
+    cats = get_initial_categories(category_seed_file)
+
+    tree = Tree("Thing")
+    for t in cats:
+        tree.children.append(Tree(t))
+
+    title_to_terms = defaultdict(set)
+    title_to_acron = defaultdict(dict)
+    title_to_context = {}
+
+    # Sort txt_files for deterministic processing
+    sorted_txt_files = sorted(txt_files)
+
+    for txt in sorted_txt_files:
+        txt_path = Path(txt)
+        title = txt_path.stem
+
+        root_folder = txt_path.parent
+        terms_csv = os.path.join(root_dir, f"{title}.terms.csv")
+        acron_csv = os.path.join(root_dir, f"{title}.acronyms.csv")
+
+        terms = read_tuples_list_from_csv(terms_csv)
+        acron = read_tuples_list_from_csv(acron_csv)
+        title_to_terms[txt] = set([t[0] for t in terms])
+        title_to_acron[txt] = {t[0]: t[1] for t in acron}
+        title_to_context[txt] = txt_path.read_text()
+
+    merged_ids_to_synonyms = defaultdict(set)
+    # Sort keys for deterministic processing
+    for title in sorted(title_to_terms.keys()):
+        vocabulary = list(title_to_terms[title])
+        acronyms = title_to_acron[title]
+        vocabulary, id_to_synonyms = process_vocabulary(vocabulary, acronyms)
+        # merge 2 dictionaries
+        for k, v in id_to_synonyms.items():
+            merged_ids_to_synonyms[k] = merged_ids_to_synonyms[k].union(v)
+
+    wordmap = {}
+    repeated_ids = set()
+    # Sort keys for deterministic processing
+    for k, v in sorted(merged_ids_to_synonyms.items()):
+        # Sort synonyms for deterministic behavior
+        sorted_synonyms = sorted(list(v))
+        t = Tree(sorted_synonyms[0])
+        t.synonyms = sorted_synonyms
+        for syn in sorted_synonyms:
+            if syn in wordmap:
+                repeated_ids.add(syn)
+                ## remove the synonym from the wordmap
+                # t = wordmap.pop(syn)
+                # make wordmap point to the previous tree (the current one will be ignored)
+                print("Merging nodes: ", wordmap[syn].synonyms, t.synonyms)
+                wordmap[syn] = t
+
+            else:
+                wordmap[syn] = t
+
+    tree_terms = tree.get_terms()
+    # remove 'Thing' from the tree list
+    tree_terms.remove("Thing")
+
+    # set wordmap entries for existing tree
+    for node in tree.get_nodes_list():
+        wordmap[node.synonyms[0]] = node
+
+    list_titles = list(title_to_terms.keys())
+    list_titles.sort()
+
+    for iteration in range(num_iterations):
+        logging.info("#" * 80)
+        logging.info(f"    Level {iteration}")
+        logging.info("#" * 80)
+
+        # Use deterministic shuffling based on seed and iteration
+        rng = random.Random(seed + iteration)
+        list_titles_copy = list_titles.copy()
+        rng.shuffle(list_titles_copy)
+
+        for j in range(len(list_titles_copy)):
+            answers_list = []
+
+            title = list_titles_copy[j]
+            context = title_to_context[title]
+
+            tree_terms, tree_paths = tree.get_terms_and_paths(ctx=context)
+            # tree_terms, tree_paths = tree.get_level_terms_and_path(level + 1, ctx=context)
+
+            vocabulary, _ = process_vocabulary(
+                list(title_to_terms[title]), title_to_acron[title]
+            )
+            vocabulary = [v for v in vocabulary if v not in repeated_ids]
+            # vocabulary = [list(v)[0] for k,v in merged_ids_to_synonyms.items()] # whole vocabulary
+            terms = sorted(vocabulary)  # Sort terms for deterministic behavior
+            random.shuffle(terms)
+
+            classes = terms.copy() + cats
+            response = query_olft(model, context, classes, terms, backend, base_url, model_params)
+            logging.info(('-' * 20) + "RESPONSE: " + ('-' * 20))
+            logging.info(response)
+            logging.info('-' * 60)
+
+            answers = parse_answer(response)
+            answers_list.append(answers)
+            
+            logging.info(('-' * 20) + "PARSED ANSWERS: " + ('-' * 20))
+            # Sort answers for deterministic logging
+            logging.info(
+                "\n".join([f"{k} isA {v}" for k, v in sorted(answers.items())])
+            )
+            logging.info('-' * 60)
+
+            answers = majority_voting_answers(wordmap, answers_list, majority=1)
+            logging.info(('-' * 20) + "MAJORITY VOTING: " + ('-' * 20))
+            # Sort answers for deterministic logging
+            logging.info(
+                "\n".join([f"{k} isA {v}" for k, v in sorted(answers.items())])
+            )
+            logging.info('-' * 60)
+            wordmap = add_asnwers(wordmap, answers, tree, destructive=False)
+            tree = remove_self_loops_tree(tree)
+
+            # taxonomy directory
+            taxonomy_dir = Path(f"taxonomy_olft_{seed}")
+            taxonomy_dir.mkdir(parents=True, exist_ok=True)
+
+            import pickle
+
+            with open(f"taxonomy_olft_{seed}/wordmap_{iteration}.pkl", "wb") as f:
+                pickle.dump(wordmap, f)
+            with open(f"taxonomy_olft_{seed}/tree_{iteration}.pkl", "wb") as f:
+                pickle.dump(tree, f)
+            current_time = time.time()
+            logging.info(f"--- Wall clock time: {current_time - start_time} seconds ---")
 
 
 if __name__ == "__main__":

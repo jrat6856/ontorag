@@ -60,7 +60,7 @@ class Termo(dict):
             )
 
     def extract_terms(
-        self, model, space_separator=True, max_length_split=2000, **kwargs
+        self, model, space_separator=True, max_length_split=2000, remove_hallucinated=True, **kwargs
     ):
         """
         Extract terms from the text using the specified model
@@ -73,7 +73,7 @@ class Termo(dict):
             The maximum length of the text to send in each query in characters
         """
         self["terms"] += self.get_filtered_list_from_llm(
-            model, self.text, space_separator, max_length_split, **kwargs
+            model, self.text, space_separator, max_length_split, remove_hallucinated, **kwargs
         )
         self["terms"] = self.postprocess_terms(
             self["terms"], self.remove_duplicates, self.remove_substrings
@@ -203,7 +203,10 @@ class Termo(dict):
         if remove_duplicates:
             all_terms = self.remove_duplicated_terms(all_terms)
         if remove_substrings:
+            excluded_terms = [x for x in all_terms if x[1] == -1] # hallucinated terms are not filtered out
+            all_terms = [x for x in all_terms if x[1] != -1] # any other term
             all_terms = self.remove_substrings_from_list(all_terms)
+            all_terms += excluded_terms
         return all_terms
 
     def postprocess_relationships(self, relationships, text, terms):
@@ -591,6 +594,7 @@ class Termo(dict):
         text,
         space_separator=True,
         max_length_split=2000,
+        remove_hallucinated=True,
         **kwargs,
     ):
         """
@@ -690,6 +694,8 @@ class Termo(dict):
                 c += len(sentence) + 1  # +1 for the periods
             if len(term_matches) == 0:
                 print(f"Term '{term}' not found in text")
+                if not remove_hallucinated:
+                    term_matches += [(term, -1, -1, -1)]
             all_terms += term_matches
 
         return all_terms
